@@ -25,6 +25,9 @@ if (!process.env.RPC_URL) {
 if (!process.env.USDC_CONTRACT_ADDRESS) {
     throw new Error('USDC_CONTRACT_ADDRESS is not defined');
 }
+if (!process.env.PERSONAL_BUDGET) {
+    throw new Error('PERSONAL_BUDGET is not defined');
+}
 
 export const ENV = {
     USER_ADDRESS: process.env.USER_ADDRESS as string,
@@ -38,4 +41,7 @@ export const ENV = {
     MONGO_URI: process.env.MONGO_URI as string,
     RPC_URL: process.env.RPC_URL as string,
     USDC_CONTRACT_ADDRESS: process.env.USDC_CONTRACT_ADDRESS as string,
+    PERSONAL_BUDGET: parseFloat(process.env.PERSONAL_BUDGET),
+    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN!,
+    TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID!,
 };

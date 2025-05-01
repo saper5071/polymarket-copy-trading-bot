@@ -25,6 +25,7 @@ export interface UserActivityInterface {
     profileImageOptimized: string;
     bot: boolean;
     botExcutedTime: number;
+    question?: string;  // Aggiunta della proprietà 'question' come opzionale
 }
 
 export interface UserPositionInterface {
