@@ -3,92 +3,131 @@ import { UserActivityInterface, UserPositionInterface } from '../interfaces/User
 import { ENV } from '../config/env';
 import { getUserActivityModel } from '../models/userHistory';
 import fetchData from '../utils/fetchData';
-import spinner from '../utils/spinner';
 import getMyBalance from '../utils/getMyBalance';
 import postOrder from '../utils/postOrder';
-import axios from 'axios'; // per Telegram
+
+import axios from 'axios';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const PROXY_WALLET = ENV.PROXY_WALLET;
-const PERSONAL_BUDGET = ENV.PERSONAL_BUDGET; // budget personale (USD)
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
-
-let temp_trades: UserActivityInterface[] = [];
 const UserActivity = getUserActivityModel(USER_ADDRESS);
 
-// Legge le transazioni da copiare dal DB
-const readTempTrade = async () => {
-  temp_trades = (await UserActivity.find({
-    $and: [
-      { type: 'TRADE' },
-      { bot: false },
-      { botExcutedTime: { $lt: RETRY_LIMIT } }
-    ]
-  }).exec()).map(t => t as UserActivityInterface);
+// Funzione per inviare un messaggio Telegram
+const sendTelegramMessage = async (message: string) => {
+  if (!ENV.TELEGRAM_BOT_TOKEN || !ENV.TELEGRAM_CHAT_ID) return;
+  const url = `https://api.telegram.org/bot${ENV.TELEGRAM_BOT_TOKEN}/sendMessage`;
+  await axios.post(url, {
+    chat_id: ENV.TELEGRAM_CHAT_ID,
+    text: message
+  });
 };
 
-// Funzione principale di esecuzione ordini
+let temp_trades: UserActivityInterface[] = [];
+
+const readTempTrade = async () => {
+  temp_trades = (
+    await UserActivity.find({
+      $and: [{ type: 'TRADE' }, { bot: false }, { botExcutedTime: { $lt: RETRY_LIMIT } }]
+    }).exec()
+  ).map((trade) => trade as UserActivityInterface);
+};
+
 const doTrading = async (clobClient: ClobClient) => {
   for (const trade of temp_trades) {
-    console.log('Trade da copiare:', trade);
+    // Log e notifica tentativo di operazione
+    console.log('Trade to copy:', trade);
+    await sendTelegramMessage(
+      `🔄 Tentativo operazione: *${trade.side}* sulla condizione ${trade.conditionId} `
+      + `(volume USDC: ${trade.usdcSize ?? (trade.size * trade.price).toFixed(2)})`
+    );
 
-    // Calcolo bilanci
-    const my_balance = await getMyBalance(PROXY_WALLET);
-    const user_balance = await getMyBalance(USER_ADDRESS);
-    console.log('Saldo mio (USDC):', my_balance, ' | Saldo utente copiato (USDC):', user_balance);
+    // Calcola importo USDC dell'operazione user
+    const tradeAmount: number =
+      trade.side === 'BUY'
+        ? Number(trade.usdcSize)
+        : Number(trade.size) * Number(trade.price);
 
-    // **Filtro operazioni <1 USD**
-    const usdAmount = trade.size * trade.price;
-    if (usdAmount < 1) {
-      console.log('Importo USD < 1, operazione scartata.');
+    // Se l'importo è inferiore a 10 USDC, ignoriamo l'operazione
+    if (tradeAmount < 10) {
+      console.log(`Operazione ignorata (${tradeAmount.toFixed(2)} USDC < 10 USDC)`);
       await UserActivity.updateOne({ _id: trade._id }, { bot: true });
-      continue;
+      await sendTelegramMessage(
+        `⚠️ Operazione ignorata: importo ${tradeAmount.toFixed(2)} USDC inferiore alla soglia di 10 USDC.`
+      );
+      continue; // Passa all'operazione successiva
     }
 
-    // **Scala proporzionale al budget personale**
-    const scale = PERSONAL_BUDGET / user_balance;
-    // Riduciamo la size dell'ordine proporzionalmente (almeno 1 azione)
-    trade.size = Math.max(1, Math.floor(trade.size * scale));
-    console.log('Share scalate a', trade.size, 'per budget personale', PERSONAL_BUDGET);
-
-    // Esegue ordine di merge/buy/sell tramite postOrder
+    // Ottieni posizioni e bilanci
     const my_positions: UserPositionInterface[] = await fetchData(
       `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}`
     );
     const user_positions: UserPositionInterface[] = await fetchData(
       `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`
     );
-    const my_position = my_positions.find(p => p.conditionId === trade.conditionId);
-    const user_position = user_positions.find(p => p.conditionId === trade.conditionId);
+    const my_position = my_positions.find(
+      (position) => position.conditionId === trade.conditionId
+    );
+    const user_position = user_positions.find(
+      (position) => position.conditionId === trade.conditionId
+    );
+    const my_balance = await getMyBalance(PROXY_WALLET); // Saldo attuale in USDC del mio wallet
+    const user_balance = await getMyBalance(USER_ADDRESS); // Saldo attuale in USDC dell'utente copiato
 
+    console.log('My current balance:', my_balance);
+    console.log('User current balance:', user_balance);
+
+    // Esegue l'operazione sul CLOB Polymarket (buy o sell)
     if (trade.side === 'BUY') {
       if (user_position && my_position && my_position.asset !== trade.asset) {
-        await postOrder(clobClient, 'merge', my_position, user_position, trade, my_balance, user_balance);
+        // Strategia di merge (caso raro)
+        await postOrder(
+          clobClient,
+          'merge',
+          my_position,
+          user_position,
+          trade,
+          my_balance,
+          user_balance
+        );
       } else {
-        await postOrder(clobClient, 'buy', my_position, user_position, trade, my_balance, user_balance);
+        await postOrder(
+          clobClient,
+          'buy',
+          my_position,
+          user_position,
+          trade,
+          my_balance,
+          user_balance
+        );
       }
     } else if (trade.side === 'SELL') {
-      await postOrder(clobClient, 'sell', my_position, user_position, trade, my_balance, user_balance);
+      await postOrder(
+        clobClient,
+        'sell',
+        my_position,
+        user_position,
+        trade,
+        my_balance,
+        user_balance
+      );
     } else {
-      console.log('Tipo di operazione non supportato');
-      await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+      console.log('Tipologia operazione non supportata:', trade.side);
+      await UserActivity.updateOne(
+        { _id: trade._id },
+        { bot: true, botExcutedTime: trade.botExcutedTime + 1 }
+      );
     }
+    // La notifica di successo/fallimento è gestita all'interno di postOrder
   }
 };
 
-// Loop continuo di controllo e trading
 const tradeExecutor = async (clobClient: ClobClient) => {
-  console.log('Copy Trading in esecuzione...');
-  await readTempTrade(); // Iniziale
   while (true) {
-    await readTempTrade();
-    if (temp_trades.length > 0) {
-      spinner.stop();
-      await doTrading(clobClient);
-    } else {
-      spinner.start('In attesa di nuove transazioni...');
-    }
-    await new Promise(res => setTimeout(res, ENV.FETCH_INTERVAL * 1000));
+    await readTempTrade();        // Legge le nuove operazioni da copiare
+    await doTrading(clobClient); // Esegue le operazioni
+    // Attendi prima di ripetere il ciclo
+    await new Promise((resolve) => setTimeout(resolve, ENV.FETCH_INTERVAL * 1000));
   }
 };
 

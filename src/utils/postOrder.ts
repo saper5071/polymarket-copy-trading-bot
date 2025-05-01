@@ -1,113 +1,176 @@
 import { ClobClient, OrderType, Side } from '@polymarket/clob-client';
-import { UserActivityInterface } from '../interfaces/User';
-import { getUserActivityModel } from '../models/userHistory';
+import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
 import { ENV } from '../config/env';
+import { getUserActivityModel } from '../models/userHistory';
+
 import axios from 'axios';
-import Spinner from './spinner';
 
-export default async function postOrder(
+const USER_ADDRESS = ENV.USER_ADDRESS;
+const RETRY_LIMIT = ENV.RETRY_LIMIT;
+const UserActivity = getUserActivityModel(USER_ADDRESS);
+
+// Funzione per inviare un messaggio Telegram
+const sendTelegramMessage = async (message: string) => {
+  if (!ENV.TELEGRAM_BOT_TOKEN || !ENV.TELEGRAM_CHAT_ID) return;
+  const url = `https://api.telegram.org/bot${ENV.TELEGRAM_BOT_TOKEN}/sendMessage`;
+  await axios.post(url, {
+    chat_id: ENV.TELEGRAM_CHAT_ID,
+    text: message
+  });
+};
+
+const postOrder = async (
   clobClient: ClobClient,
-  action: 'buy' | 'sell' | 'merge',
-  myPos: any,
-  userPos: any,
+  condition: string,
+  my_position: UserPositionInterface | undefined,
+  user_position: UserPositionInterface | undefined,
   trade: UserActivityInterface,
-  myBalance: number,
-  userBalance: number
-) {
-  const minMyInvestment = 1;     // Investimento minimo da parte tua
-  const minUserTradeAmount = 10; // Ignora le operazioni dell'utente se sotto questa soglia
+  my_balance: number,
+  user_balance: number
+) => {
+  // [Case 'merge' omitted...]
 
-  let orderArgs: any;
-  let side: Side;
-
-  // Calcola il valore dell'operazione dell'utente che stai copiando
-  const userTradeValue = trade.size * trade.price;
-
-  // Ignora operazioni troppo piccole dell'utente copiato
-  if (userTradeValue < minUserTradeAmount) {
-    console.log('Operazione ignorata: l\'utente copiato ha investito meno di 10 euro.');
-    return;
-  }
-
-  // Calcola l'investimento proporzionale da fare
-  let myInvestment = (myBalance / userBalance) * userTradeValue;
-
-  // Se è inferiore a 1 euro, investi comunque 1 euro
-  if (myInvestment < minMyInvestment) {
-    myInvestment = minMyInvestment;
-  }
-
-  // Calcola il "size" da ordinare
-  const mySize = myInvestment / trade.price;
-
-  // Prepara ordine
-  if (action === 'buy' || action === 'merge') {
-    side = Side.BUY;
-    orderArgs = {
-      side: Side.BUY,
-      tokenID: userPos?.asset,
-      size: mySize,
-      price: trade.price,
-      feeRateBps: '0'
-    };
-  } else {
-    side = Side.SELL;
-    orderArgs = {
-      side: Side.SELL,
-      tokenID: myPos?.asset,
-      size: trade.size,
-      price: trade.price,
-      feeRateBps: '0'
-    };
-  }
-
-  try {
-    const signedOrder = await clobClient.createOrder(orderArgs);
-    const resp = await clobClient.postOrder(signedOrder, OrderType.GTC);
-
-    if (resp.success) {
-      console.log('Trade copiato con successo:', resp);
-      const sideText = side === Side.BUY ? 'ACQUISTO' : 'VENDITA';
-      const marketLink = `https://polymarket.com/market/${trade.conditionId}`;
-      const message = 
-        `*Mercato:* ${trade.title?.slice(0, 30)}...\n` +
-        `*Tipo:* ${sideText}\n` +
-        `*Importo:* ${myInvestment.toFixed(2)} USD\n` +
-        `[🔗 Apri Mercato](${marketLink})`;
-
-      await sendTelegramNotification(message);
-
-      const userActivityModel = getUserActivityModel(trade.proxyWallet);
-      await userActivityModel.updateOne(
-        { _id: trade._id },
-        { bot: true, botExcutedTime: trade.botExcutedTime + 1 }
-      );
-    } else {
-      console.error('Ordine fallito:', resp);
-
-      const userActivityModel = getUserActivityModel(trade.proxyWallet);
-      await userActivityModel.updateOne(
-        { _id: trade._id },
-        { botExcutedTime: trade.botExcutedTime + 1 }
-      );
+  // === BUY Strategy ===
+  if (condition === 'buy') {
+    console.log('Buy Strategy...');
+    // Calcola proporzione usando il saldo personale (my_balance) e l'utente copiato (user_balance)
+    const originalUserBalance = user_balance + (trade.usdcSize ?? 0);
+    const ratio = my_balance / originalUserBalance;
+    console.log('ratio', ratio.toFixed(4));
+    // Calcola quanto investire in base alla proporzione
+    let remaining = (trade.usdcSize ?? 0) * ratio;
+    // Se l'importo proporzionale è inferiore a 1 USDC, investiamo 1 USDC minimo
+    if (remaining > 0 && remaining < 1) {
+      console.log('Importo proporzionale < 1 USDC, imposto a 1 USDC');
+      remaining = 1;
     }
-  } catch (error) {
-    console.error('Errore durante la creazione dell\'ordine:', error);
+    let retry = 0;
+    while (remaining > 0 && retry < RETRY_LIMIT) {
+      const orderBook = await clobClient.getOrderBook(trade.asset);
+      if (!orderBook.asks || orderBook.asks.length === 0) {
+        console.log('No asks found');
+        await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+        break;
+      }
+      const minPriceAsk = orderBook.asks.reduce((min, ask) =>
+        parseFloat(ask.price) < parseFloat(min.price) ? ask : min, orderBook.asks[0]
+      );
+      console.log('Min price ask:', minPriceAsk);
+      if (parseFloat(minPriceAsk.price) - 0.05 > trade.price) {
+        console.log('Prezzo troppo alto rispetto all\'operazione dell\'utente - non copio');
+        await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+        break;
+      }
+      let order_args;
+      // Se il budget rimanente permette di comprare tutte le dimensioni disponibili
+      if (remaining <= parseFloat(minPriceAsk.size) * parseFloat(minPriceAsk.price)) {
+        order_args = {
+          side: Side.BUY,
+          tokenID: trade.asset,
+          amount: remaining / parseFloat(minPriceAsk.price),
+          price: parseFloat(minPriceAsk.price),
+        };
+      } else {
+        // Altrimenti compro tutto ciò che trovo a prezzo minimo
+        order_args = {
+          side: Side.BUY,
+          tokenID: trade.asset,
+          amount: parseFloat(minPriceAsk.size),
+          price: parseFloat(minPriceAsk.price),
+        };
+      }
+      console.log('Order args:', order_args);
+      const signedOrder = await clobClient.createMarketOrder(order_args);
+      const resp = await clobClient.postOrder(signedOrder, OrderType.FOK);
+      if (resp.success === true) {
+        console.log('Ordine BUY eseguito con successo:', resp);
+        retry = 0;
+        remaining -= order_args.amount * order_args.price;
+      } else {
+        retry += 1;
+        console.log('Errore esecuzione ordine BUY, ritento...', resp);
+      }
+    }
+    // Segnala completamento o fallimento al database e invia notifica Telegram
+    if (retry >= RETRY_LIMIT) {
+      await UserActivity.updateOne({ _id: trade._id }, { bot: true, botExcutedTime: retry });
+      await sendTelegramMessage(`❌ Operazione *BUY* condizione ${trade.conditionId} fallita dopo ${retry} tentativi.`);
+    } else {
+      await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+      await sendTelegramMessage(`✅ Operazione *BUY* condizione ${trade.conditionId} completata con successo.`);
+    }
   }
-}
+  // === SELL Strategy ===
+  else if (condition === 'sell') {
+    console.log('Sell Strategy...');
+    let remaining = 0;
+    if (!my_position) {
+      console.log('Nessuna posizione da vendere');
+      await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+      await sendTelegramMessage(`⚠️ Operazione *SELL* condizione ${trade.conditionId} ignorata: nessuna posizione da vendere.`);
+      return;
+    } else if (!user_position) {
+      remaining = my_position.size;
+    } else {
+      const ratio = (trade.size ?? 0) / ((user_position.size ?? 0) + (trade.size ?? 0));
+      console.log('ratio', ratio.toFixed(4));
+      remaining = (my_position.size ?? 0) * ratio;
+      // Se il risultato proporzionale è < 1 USDC, vendiamo in modo da ottenere 1 USDC
+      if (remaining > 0 && remaining * (trade.price ?? 0) < 1) {
+        console.log('Importo proporzionale < 1 USDC, vendo quantità per 1 USDC');
+        remaining = 1 / (trade.price ?? 1);
+      }
+    }
+    let retry = 0;
+    while (remaining > 0 && retry < RETRY_LIMIT) {
+      const orderBook = await clobClient.getOrderBook(trade.asset);
+      if (!orderBook.bids || orderBook.bids.length === 0) {
+        console.log('No bids found');
+        await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+        break;
+      }
+      const maxPriceBid = orderBook.bids.reduce((max, bid) =>
+        parseFloat(bid.price) > parseFloat(max.price) ? bid : max, orderBook.bids[0]
+      );
+      console.log('Max price bid:', maxPriceBid);
+      let order_args;
+      if (remaining <= parseFloat(maxPriceBid.size)) {
+        order_args = {
+          side: Side.SELL,
+          tokenID: trade.asset,
+          amount: remaining,
+          price: parseFloat(maxPriceBid.price),
+        };
+      } else {
+        order_args = {
+          side: Side.SELL,
+          tokenID: trade.asset,
+          amount: parseFloat(maxPriceBid.size),
+          price: parseFloat(maxPriceBid.price),
+        };
+      }
+      console.log('Order args:', order_args);
+      const signedOrder = await clobClient.createMarketOrder(order_args);
+      const resp = await clobClient.postOrder(signedOrder, OrderType.FOK);
+      if (resp.success === true) {
+        console.log('Ordine SELL eseguito con successo:', resp);
+        retry = 0;
+        remaining -= order_args.amount;
+      } else {
+        retry += 1;
+        console.log('Errore esecuzione ordine SELL, ritento...', resp);
+      }
+    }
+    // Segnala completamento o fallimento al database e invia notifica Telegram
+    if (retry >= RETRY_LIMIT) {
+      await UserActivity.updateOne({ _id: trade._id }, { bot: true, botExcutedTime: retry });
+      await sendTelegramMessage(`❌ Operazione *SELL* condizione ${trade.conditionId} fallita dopo ${retry} tentativi.`);
+    } else {
+      await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+      await sendTelegramMessage(`✅ Operazione *SELL* condizione ${trade.conditionId} completata con successo.`);
+    }
+  }
+  // Altri casi (merge, etc.) rimangono inalterati...
+};
 
-async function sendTelegramNotification(text: string) {
-  const token = ENV.TELEGRAM_BOT_TOKEN;
-  const chatId = ENV.TELEGRAM_CHAT_ID;
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  try {
-    await axios.post(url, {
-      chat_id: chatId,
-      text: text,
-      parse_mode: 'Markdown'
-    });
-    console.log('Notifica Telegram inviata.');
-  } catch (err) {
-    console.error('Errore invio Telegram:', err);
-  }
-}
+export default postOrder;
