@@ -14,33 +14,39 @@ export default async function postOrder(
   myBalance: number,
   userBalance: number
 ) {
-  const minInvestment = 1; // Minimo investimento in euro
-  const minBuyInvestment = 10; // Minimo investimento per le operazioni di buy
+  const minMyInvestment = 1;     // Investimento minimo da parte tua
+  const minUserTradeAmount = 10; // Ignora le operazioni dell'utente se sotto questa soglia
 
   let orderArgs: any;
   let side: Side;
 
-  // Calcola l'importo da copiare
-  let investmentToCopy = (myBalance / userBalance) * trade.size;
+  // Calcola il valore dell'operazione dell'utente che stai copiando
+  const userTradeValue = trade.size * trade.price;
 
-  // Se l'importo da copiare è inferiore al minimo, usa 1 euro
-  if (investmentToCopy < minInvestment) {
-    investmentToCopy = minInvestment;
+  // Ignora operazioni troppo piccole dell'utente copiato
+  if (userTradeValue < minUserTradeAmount) {
+    console.log('Operazione ignorata: l\'utente copiato ha investito meno di 10 euro.');
+    return;
   }
 
-  // Se l'azione è di tipo 'buy' e l'importo da copiare è inferiore a 10 euro, ignoriamo l'operazione
-  if (action === 'buy' && investmentToCopy < minBuyInvestment) {
-    console.log('Operazione di acquisto ignorata perché l\'importo è inferiore a 10 euro');
-    return; // Ignora questa operazione
+  // Calcola l'investimento proporzionale da fare
+  let myInvestment = (myBalance / userBalance) * userTradeValue;
+
+  // Se è inferiore a 1 euro, investi comunque 1 euro
+  if (myInvestment < minMyInvestment) {
+    myInvestment = minMyInvestment;
   }
 
-  // Imposta il lato dell'ordine (acquisto o vendita)
+  // Calcola il "size" da ordinare
+  const mySize = myInvestment / trade.price;
+
+  // Prepara ordine
   if (action === 'buy' || action === 'merge') {
     side = Side.BUY;
     orderArgs = {
       side: Side.BUY,
       tokenID: userPos?.asset,
-      size: investmentToCopy, // Usa l'importo calcolato
+      size: mySize,
       price: trade.price,
       feeRateBps: '0'
     };
@@ -49,39 +55,37 @@ export default async function postOrder(
     orderArgs = {
       side: Side.SELL,
       tokenID: myPos?.asset,
-      size: investmentToCopy, // Usa l'importo calcolato
+      size: trade.size,
       price: trade.price,
       feeRateBps: '0'
     };
   }
 
   try {
-    // Crea e invia l'ordine sulla CLOB
     const signedOrder = await clobClient.createOrder(orderArgs);
     const resp = await clobClient.postOrder(signedOrder, OrderType.GTC);
 
     if (resp.success) {
       console.log('Trade copiato con successo:', resp);
-      // Invia notifica Telegram
       const sideText = side === Side.BUY ? 'ACQUISTO' : 'VENDITA';
       const marketLink = `https://polymarket.com/market/${trade.conditionId}`;
       const message = 
         `*Mercato:* ${trade.title?.slice(0, 30)}...\n` +
         `*Tipo:* ${sideText}\n` +
-        `*Importo:* ${ (investmentToCopy * trade.price).toFixed(2) } USD\n` + // Mostra l'importo corretto
+        `*Importo:* ${myInvestment.toFixed(2)} USD\n` +
         `[🔗 Apri Mercato](${marketLink})`;
+
       await sendTelegramNotification(message);
 
-      // Aggiorna DB che trade è stato processato
-      const userActivityModel = getUserActivityModel(trade.proxyWallet); // Passaggio corretto
+      const userActivityModel = getUserActivityModel(trade.proxyWallet);
       await userActivityModel.updateOne(
         { _id: trade._id },
         { bot: true, botExcutedTime: trade.botExcutedTime + 1 }
       );
     } else {
-      console.error('Ordine fallito, ritentando:', resp);
+      console.error('Ordine fallito:', resp);
 
-      const userActivityModel = getUserActivityModel(trade.proxyWallet); // Passaggio corretto
+      const userActivityModel = getUserActivityModel(trade.proxyWallet);
       await userActivityModel.updateOne(
         { _id: trade._id },
         { botExcutedTime: trade.botExcutedTime + 1 }
