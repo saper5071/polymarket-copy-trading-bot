@@ -19,7 +19,7 @@ const sendTelegramMessage = async (message: string) => {
   const url = `https://api.telegram.org/bot${ENV.TELEGRAM_BOT_TOKEN}/sendMessage`;
   await axios.post(url, {
     chat_id: ENV.TELEGRAM_CHAT_ID,
-    text: message
+    text: message,
   });
 };
 
@@ -28,7 +28,7 @@ let temp_trades: UserActivityInterface[] = [];
 const readTempTrade = async () => {
   temp_trades = (
     await UserActivity.find({
-      $and: [{ type: 'TRADE' }, { bot: false }, { botExcutedTime: { $lt: RETRY_LIMIT } }]
+      $and: [{ type: 'TRADE' }, { bot: false }, { botExcutedTime: { $lt: RETRY_LIMIT } }],
     }).exec()
   ).map((trade) => trade as UserActivityInterface);
 };
@@ -38,8 +38,8 @@ const doTrading = async (clobClient: ClobClient) => {
     // Log e notifica tentativo di operazione
     console.log('Trade to copy:', trade);
     await sendTelegramMessage(
-      `🔄 Tentativo operazione: *${trade.side}* sulla condizione ${trade.conditionId} `
-      + `(volume USDC: ${trade.usdcSize ?? (trade.size * trade.price).toFixed(2)})`
+      `🔄 Tentativo operazione: *${trade.side}* sulla condizione ${trade.conditionId} ` +
+        `(volume USDC: ${trade.usdcSize ?? (trade.size * trade.price).toFixed(2)})`
     );
 
     // Calcola importo USDC dell'operazione user
@@ -65,9 +65,7 @@ const doTrading = async (clobClient: ClobClient) => {
     const user_positions: UserPositionInterface[] = await fetchData(
       `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`
     );
-    const my_position = my_positions.find(
-      (position) => position.conditionId === trade.conditionId
-    );
+    const my_position = my_positions.find((position) => position.conditionId === trade.conditionId);
     const user_position = user_positions.find(
       (position) => position.conditionId === trade.conditionId
     );
@@ -124,7 +122,7 @@ const doTrading = async (clobClient: ClobClient) => {
 
 const tradeExecutor = async (clobClient: ClobClient) => {
   while (true) {
-    await readTempTrade();        // Legge le nuove operazioni da copiare
+    await readTempTrade(); // Legge le nuove operazioni da copiare
     await doTrading(clobClient); // Esegue le operazioni
     // Attendi prima di ripetere il ciclo
     await new Promise((resolve) => setTimeout(resolve, ENV.FETCH_INTERVAL * 1000));

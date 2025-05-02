@@ -3,21 +3,35 @@ import { ENV } from './config/env';
 import createClobClient from './utils/createClobClient';
 import tradeExecutor from './services/tradeExecutor';
 import tradeMonitor from './services/tradeMonitor';
-
 import axios from 'axios';
+import { getBalance } from './utils/getBalance'; // ← lo creiamo subito dopo
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const PROXY_WALLET = ENV.PROXY_WALLET;
 
-// Funzione per inviare un messaggio Telegram (usa axios per chiamare Telegram Bot API)
+// Funzione per inviare un messaggio Telegram
 const sendTelegramMessage = async (message: string) => {
   if (!ENV.TELEGRAM_BOT_TOKEN || !ENV.TELEGRAM_CHAT_ID) return;
   const url = `https://api.telegram.org/bot${ENV.TELEGRAM_BOT_TOKEN}/sendMessage`;
-  await axios.post(url, {
-    chat_id: ENV.TELEGRAM_CHAT_ID,
-    text: message
-  });
+  try {
+    await axios.post(url, {
+      chat_id: ENV.TELEGRAM_CHAT_ID,
+      text: message,
+      parse_mode: 'Markdown'
+    });
+  } catch (error) {
+    console.error('Errore invio messaggio Telegram:', error);
+  }
 };
+
+// Esempio di funzione che potresti usare per evitare spese eccessive
+async function shouldCopyTrade(tradeUSDC: number, userBalance: number, proxyBalance: number): Promise<number | null> {
+  const ratio = proxyBalance / userBalance;
+  const max = tradeUSDC * ratio;
+
+  if (max < 1) return null;
+  return max;
+}
 
 export const main = async () => {
   await connectDB();
@@ -25,7 +39,6 @@ export const main = async () => {
   console.log(`Target User Wallet address: ${USER_ADDRESS}`);
   console.log(`My Wallet address: ${PROXY_WALLET}`);
 
-  // Invia un messaggio Telegram all'avvio del bot
   await sendTelegramMessage(
     `🤖 *Bot CopyTrading Avviato*\nUtente target: ${USER_ADDRESS}\nMio wallet: ${PROXY_WALLET}`
   );
