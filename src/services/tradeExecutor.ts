@@ -48,15 +48,24 @@ const doTrading = async (clobClient: ClobClient) => {
         ? Number(trade.usdcSize)
         : Number(trade.size) * Number(trade.price);
 
-    // Se l'importo è inferiore a 10 USDC, ignoriamo l'operazione
-    if (tradeAmount < 10) {
-      console.log(`Operazione ignorata (${tradeAmount.toFixed(2)} USDC < 10 USDC)`);
-      await UserActivity.updateOne({ _id: trade._id }, { bot: true });
-      await sendTelegramMessage(
-        `⚠️ Operazione ignorata: importo ${tradeAmount.toFixed(2)} USDC inferiore alla soglia di 10 USDC.`
-      );
-      continue; // Passa all'operazione successiva
-    }
+        if (tradeAmount < 10) {
+          console.log(`Operazione ignorata (${tradeAmount.toFixed(2)} USDC < 10 USDC)`);
+          await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+          await sendTelegramMessage(
+            `⚠️ Operazione ignorata: importo ${tradeAmount.toFixed(2)} USDC inferiore alla soglia di 10 USDC.`
+          );
+          continue; // Passa all'operazione successiva
+        }
+    
+        // Se è un BUY e il prezzo è ≥ 0.95, ignoriamo l'operazione
+        if (trade.side === 'BUY' && trade.price >= 0.95) {
+          console.log(`BUY ignorato: prezzo ${trade.price} ≥ 0.95`);
+          await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+          await sendTelegramMessage(
+            `⚠️ BUY ignorato: prezzo ${trade.price} ≥ 0.95 (superiore alla soglia impostata).`
+          );
+          continue; // Passa all'operazione successiva
+        }
 
     // Ottieni posizioni e bilanci
     const my_positions: UserPositionInterface[] = await fetchData(
